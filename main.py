@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shlex
+import shutil
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Header, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,15 +30,26 @@ load_env_file()
 # ==============================================================================
 # Konfigurasi Environment & Autentikasi
 # ==============================================================================
-# Token autentikasi untuk membatasi akses (opsional, jika kosong tidak ada auth check)
 AUTH_TOKEN = os.getenv("CLI_AUTH_TOKEN") or os.getenv("API_KEY")
 
-# Deteksi lokasi agy di macOS lokal jika tersedia
-DEFAULT_AGY_BIN = os.path.expanduser("~/.local/bin/agy")
+# Deteksi lokasi agy di Windows, macOS, atau Linux
+detected_agy = shutil.which("agy") or shutil.which("agy.exe")
+if not detected_agy:
+    user_home = os.path.expanduser("~")
+    possible_paths = [
+        os.path.join(user_home, ".local", "bin", "agy.exe"),
+        os.path.join(user_home, ".local", "bin", "agy"),
+        os.path.join(user_home, "AppData", "Local", "Programs", "agy", "agy.exe"),
+    ]
+    for p in possible_paths:
+        if os.path.isfile(p):
+            detected_agy = p
+            break
+
 DEFAULT_CLI_CMD = (
-    f"{DEFAULT_AGY_BIN} --dangerously-skip-permissions"
-    if os.path.isfile(DEFAULT_AGY_BIN)
-    else "echo"
+    f'"{detected_agy}" --dangerously-skip-permissions'
+    if detected_agy
+    else "agy --dangerously-skip-permissions"
 )
 
 # Command CLI dasar yang akan dibungkus
@@ -46,10 +58,10 @@ CLI_COMMAND = os.getenv("CLI_COMMAND", DEFAULT_CLI_CMD)
 # Default model AI (menggunakan model agy)
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-3.8-flash")
 
-# Flag argumen untuk model pada CLI tool (misal: '--model' atau '-m')
+# Flag argumen untuk model pada CLI tool
 CLI_MODEL_FLAG = os.getenv("CLI_MODEL_FLAG", "--model")
 
-# Flag argumen untuk prompt (untuk agy menggunakan '-p', jika kosong prompt langsung di-append)
+# Flag argumen untuk prompt (untuk agy menggunakan '-p')
 CLI_PROMPT_FLAG = os.getenv("CLI_PROMPT_FLAG", "-p" if "agy" in CLI_COMMAND else "")
 
 # Mode input: 'arg' atau 'stdin'
@@ -60,11 +72,11 @@ CLI_INPUT_MODE = os.getenv("CLI_INPUT_MODE", "arg").lower()
 # ==============================================================================
 app = FastAPI(
     title="AGY CLI Wrapper REST API",
-    description="FastAPI service wrapper untuk mengeksekusi Antigravity (agy) CLI tool secara asynchronous.",
-    version="1.2.0",
+    description="FastAPI service wrapper untuk mengeksekusi Antigravity (agy) CLI tool di Windows / macOS / Linux.",
+    version="1.3.0",
 )
 
-# CORS Middleware (mengizinkan pemanggilan dari browser / frontend jika diperlukan)
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -115,12 +127,7 @@ def verify_authentication(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> None:
-    """
-    Memvalidasi token jika AUTH_TOKEN / API_KEY diset pada environment variable.
-    Mendukung header 'X-API-Key: <token>' atau 'Authorization: Bearer <token>'.
-    """
     if not AUTH_TOKEN:
-        # Jika tidak ada token yang disetel di server, bypass autentikasi
         return
 
     provided_token = None
@@ -142,37 +149,30 @@ def verify_authentication(
 
 
 # ==============================================================================
-# Helper Eksekutor Subprocess (Asynchronous & Safe)
+# Helper Eksekutor Subprocess (Cross-platform Windows/Mac/Linux)
 # ==============================================================================
 async def execute_cli(prompt: str, timeout: int, model: Optional[str] = None) -> tuple[str, str]:
-    """
-    Mengeksekusi CLI tool secara asynchronous dan aman tanpa `shell=True`
-    untuk mencegah risiko shell injection.
-    Mengembalikan (stdout_text, active_model).
-    """
-    # Parsing perintah dasar CLI
-    base_args = shlex.split(CLI_COMMAND)
+    # Parsing perintah dasar CLI dengan kompatibilitas Windows / POSIX
+    is_windows = os.name == "nt"
+    base_args = shlex.split(CLI_COMMAND, posix=not is_windows)
     if not base_args:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Konfigurasi CLI_COMMAND kosong atau tidak valid.",
         )
 
-    # Tentukan model aktif (prioritas: request dari Chiko > DEFAULT_MODEL)
+    # Tentukan model aktif
     active_model = model.strip() if model and model.strip() else DEFAULT_MODEL
 
     cmd_args = list(base_args)
 
-    # Tambahkan parameter flag model ke CLI jika ada flag yang dikonfigurasi
     if active_model and CLI_MODEL_FLAG:
         cmd_args.extend([CLI_MODEL_FLAG, active_model])
 
-    # Tentukan argumen prompt atau stdin sesuai CLI_INPUT_MODE
     stdin_data: Optional[bytes] = None
     if CLI_INPUT_MODE == "stdin":
         stdin_data = prompt.encode("utf-8")
     else:
-        # Mode 'arg': gunakan flag (misal: '-p') jika dikonfigurasi
         if CLI_PROMPT_FLAG:
             cmd_args.extend([CLI_PROMPT_FLAG, prompt])
         else:
@@ -196,7 +196,7 @@ async def execute_cli(prompt: str, timeout: int, model: Optional[str] = None) ->
     except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Perintah/binary '{base_args[0]}' tidak ditemukan pada sistem.",
+            detail=f"Perintah/binary '{base_args[0]}' tidak ditemukan pada sistem Windows/Mini PC.",
         )
     except Exception as exc:
         raise HTTPException(
@@ -211,7 +211,6 @@ async def execute_cli(prompt: str, timeout: int, model: Optional[str] = None) ->
             timeout=float(timeout),
         )
     except asyncio.TimeoutError:
-        # Hentikan proses jika melebihi batas waktu
         try:
             process.kill()
             await process.wait()
@@ -223,11 +222,9 @@ async def execute_cli(prompt: str, timeout: int, model: Optional[str] = None) ->
             detail=f"Eksekusi CLI melebihi batas waktu (timeout {timeout} detik).",
         )
 
-    # Dekode output stdout dan stderr
     stdout_text = stdout.decode("utf-8", errors="replace").strip()
     stderr_text = stderr.decode("utf-8", errors="replace").strip()
 
-    # Periksa status return code dari CLI
     if process.returncode != 0:
         error_msg = stderr_text if stderr_text else f"CLI exit code: {process.returncode}"
         raise HTTPException(
@@ -248,9 +245,6 @@ async def execute_cli(prompt: str, timeout: int, model: Optional[str] = None) ->
     summary="Health check endpoint",
 )
 async def health_check():
-    """
-    Endpoint healthcheck sederhana untuk memonitor status server.
-    """
     return {"status": "healthy"}
 
 
@@ -272,26 +266,17 @@ async def run_cli_handler(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
-    """
-    Menerima JSON prompt, opsi model, dan timeout, menjalankan perintah CLI,
-    dan mengembalikan hasilnya dalam format JSON.
-    """
-    # 1. Validasi Autentikasi
     verify_authentication(x_api_key=x_api_key, authorization=authorization)
-
-    # 2. Eksekusi CLI Asynchronous
     output_text, active_model = await execute_cli(
         prompt=payload.prompt,
         timeout=payload.timeout,
         model=payload.model,
     )
-
-    # 3. Return JSON Response
     return RunResponse(success=True, output=output_text, model=active_model)
 
 
 # ==============================================================================
-# Direct execution (untuk testing lokal dengan `python main.py`)
+# Direct execution
 # ==============================================================================
 if __name__ == "__main__":
     import uvicorn
