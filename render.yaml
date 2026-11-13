@@ -1,0 +1,23 @@
+# ==============================================================================
+# Render.com Blueprint (Infrastructure as Code)
+# https://render.com/docs/blueprint-spec
+# ==============================================================================
+services:
+  - type: web
+    name: fastapi-cli-wrapper
+    runtime: docker
+    plan: free # Anda bisa mengganti ke 'starter' untuk beban produksi
+    region: singapore # Pilihan region: singapore, oregon, frankfurt, ohio
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: CLI_AUTH_TOKEN
+        generateValue: true # Render akan secara otomatis membuat token acak yang aman
+      - key: CLI_COMMAND
+        value: "echo" # Sesuaikan dengan binary CLI Anda (misal: "my-cli-tool" atau "python -m my_module")
+      - key: CLI_INPUT_MODE
+        value: "arg" # Opsi: 'arg' (prompt sebagai parameter) atau 'stdin' (prompt dialirkan lewat stdin)
