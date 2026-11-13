@@ -6,33 +6,62 @@ from fastapi import FastAPI, HTTPException, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+
+# ==============================================================================
+# Helper Load File .env (Otomatis tanpa dependensi tambahan)
+# ==============================================================================
+def load_env_file():
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.isfile(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    if key not in os.environ:
+                        os.environ[key] = val
+
+
+load_env_file()
+
 # ==============================================================================
 # Konfigurasi Environment & Autentikasi
 # ==============================================================================
 # Token autentikasi untuk membatasi akses (opsional, jika kosong tidak ada auth check)
 AUTH_TOKEN = os.getenv("CLI_AUTH_TOKEN") or os.getenv("API_KEY")
 
-# Command CLI dasar yang akan dibungkus (contoh: 'echo', 'git', atau path binary tool kustom)
-CLI_COMMAND = os.getenv("CLI_COMMAND", "echo")
+# Deteksi lokasi agy di macOS lokal jika tersedia
+DEFAULT_AGY_BIN = os.path.expanduser("~/.local/bin/agy")
+DEFAULT_CLI_CMD = (
+    f"{DEFAULT_AGY_BIN} --dangerously-skip-permissions"
+    if os.path.isfile(DEFAULT_AGY_BIN)
+    else "echo"
+)
 
-# Default model AI yang digunakan jika Chiko tidak mengirimkan parameter 'model'
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-1.5-flash")
+# Command CLI dasar yang akan dibungkus
+CLI_COMMAND = os.getenv("CLI_COMMAND", DEFAULT_CLI_CMD)
 
-# Flag argumen untuk model pada CLI tool (misal: '--model' atau '-m', kosongkan jika tidak ingin flag)
+# Default model AI (menggunakan model agy)
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-3.8-flash")
+
+# Flag argumen untuk model pada CLI tool (misal: '--model' atau '-m')
 CLI_MODEL_FLAG = os.getenv("CLI_MODEL_FLAG", "--model")
 
-# Mode input:
-# - 'arg'   : prompt dikirimkan sebagai argumen baris perintah (contoh: `my-cli --model gemini "halo"`)
-# - 'stdin' : prompt dikirimkan melalui stdin stream (cocok untuk tool REPL/interaktif)
+# Flag argumen untuk prompt (untuk agy menggunakan '-p', jika kosong prompt langsung di-append)
+CLI_PROMPT_FLAG = os.getenv("CLI_PROMPT_FLAG", "-p" if "agy" in CLI_COMMAND else "")
+
+# Mode input: 'arg' atau 'stdin'
 CLI_INPUT_MODE = os.getenv("CLI_INPUT_MODE", "arg").lower()
 
 # ==============================================================================
 # Inisialisasi Aplikasi FastAPI
 # ==============================================================================
 app = FastAPI(
-    title="CLI Wrapper REST API",
-    description="FastAPI service wrapper untuk mengeksekusi Command Line Interface (CLI) tool secara asynchronous.",
-    version="1.1.0",
+    title="AGY CLI Wrapper REST API",
+    description="FastAPI service wrapper untuk mengeksekusi Antigravity (agy) CLI tool secara asynchronous.",
+    version="1.2.0",
 )
 
 # CORS Middleware (mengizinkan pemanggilan dari browser / frontend jika diperlukan)
@@ -57,15 +86,15 @@ class RunRequest(BaseModel):
     )
     model: Optional[str] = Field(
         default=None,
-        description="Nama model AI (misal: 'gemini-1.5-flash', 'gemini-2.0-flash', dll). Jika tidak diisi, menggunakan default server.",
-        examples=["gemini-1.5-flash"],
+        description="Nama model AI (misal: 'gemini-3.8-flash', 'gemini-1.5-flash', dll).",
+        examples=["gemini-3.8-flash"],
     )
     timeout: int = Field(
-        default=60,
+        default=90,
         ge=1,
         le=600,
-        description="Batas waktu eksekusi dalam detik (default: 60, max: 600).",
-        examples=[60],
+        description="Batas waktu eksekusi dalam detik (default: 90, max: 600).",
+        examples=[90],
     )
 
 
@@ -138,15 +167,18 @@ async def execute_cli(prompt: str, timeout: int, model: Optional[str] = None) ->
     if active_model and CLI_MODEL_FLAG:
         cmd_args.extend([CLI_MODEL_FLAG, active_model])
 
-    # Tentukan argumen dan stdin sesuai CLI_INPUT_MODE
+    # Tentukan argumen prompt atau stdin sesuai CLI_INPUT_MODE
     stdin_data: Optional[bytes] = None
     if CLI_INPUT_MODE == "stdin":
         stdin_data = prompt.encode("utf-8")
     else:
-        # Mode 'arg': prompt ditambahkan sebagai argumen baris perintah
-        cmd_args.append(prompt)
+        # Mode 'arg': gunakan flag (misal: '-p') jika dikonfigurasi
+        if CLI_PROMPT_FLAG:
+            cmd_args.extend([CLI_PROMPT_FLAG, prompt])
+        else:
+            cmd_args.append(prompt)
 
-    # Siapkan subprocess environment (mengekspos MODEL dan CLI_MODEL jika CLI membutuhkannya)
+    # Siapkan subprocess environment
     sub_env = os.environ.copy()
     if active_model:
         sub_env["MODEL"] = active_model
@@ -217,7 +249,7 @@ async def execute_cli(prompt: str, timeout: int, model: Optional[str] = None) ->
 )
 async def health_check():
     """
-    Endpoint healthcheck sederhana untuk memonitor ketersediaan aplikasi di Render.com.
+    Endpoint healthcheck sederhana untuk memonitor status server.
     """
     return {"status": "healthy"}
 
