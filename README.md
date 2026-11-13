@@ -21,6 +21,7 @@ REST API server berbasis Python (FastAPI + Uvicorn) yang membungkus (*wrapper*) 
 
 ## 🚀 Fitur Utama
 
+- **Pemilihan Model Dinamis oleh Client (Chiko)**: Client dapat menentukan model secara bebas di setiap request via field `"model"`, atau mengandalkan default server.
 - **FastAPI Asynchronous Subprocess**: Menggunakan `asyncio.create_subprocess_exec` tanpa `shell=True` untuk mencegah kerentanan *Shell Injection*.
 - **Endpoint Healthcheck**: `GET /health` yang siap dipantau oleh monitoring Render.
 - **Endpoint Eksekusi CLI**: `POST /api/chat` (dan alias `POST /api/run`) dengan batas `timeout` yang dapat disesuaikan per request.
@@ -39,7 +40,9 @@ REST API server berbasis Python (FastAPI + Uvicorn) yang membungkus (*wrapper*) 
 | :--- | :--- | :--- |
 | `PORT` | `8000` | Port tempat Uvicorn mendengarkan request (diatur otomatis oleh Render). |
 | `CLI_AUTH_TOKEN` / `API_KEY` | *(Kosong)* | Token rahasia untuk memproteksi API. Jika dikosongkan, API terbuka untuk publik. |
-| `CLI_COMMAND` | `echo` | Perintah atau path biner CLI yang akan dipanggil (contoh: `python3 mock_cli.py`, `curl`, `my-tool`). |
+| `CLI_COMMAND` | `echo` | Perintah atau path biner CLI yang akan dipanggil (contoh: `python3 mock_cli.py`, `my-tool`). |
+| `DEFAULT_MODEL` | `gemini-1.5-flash` | Model default yang digunakan jika client (Chiko) tidak mengirim parameter `model`. |
+| `CLI_MODEL_FLAG` | `--model` | Flag argumen model yang disematkan saat memanggil CLI tool (contoh: `--model` atau `-m`). |
 | `CLI_INPUT_MODE` | `arg` | Mode pengiriman prompt: `arg` (sebagai argumen baris perintah) atau `stdin` (dialirkan lewat standar input). |
 
 ---
@@ -62,7 +65,6 @@ REST API server berbasis Python (FastAPI + Uvicorn) yang membungkus (*wrapper*) 
 
 3. **Jalankan server:**
    ```bash
-   # Contoh menjalankan dengan Mock CLI lokal:
    export CLI_COMMAND="python3 mock_cli.py"
    export CLI_AUTH_TOKEN="rahasia123"
    python3 main.py
@@ -89,11 +91,6 @@ REST API server berbasis Python (FastAPI + Uvicorn) yang membungkus (*wrapper*) 
      fastapi-cli-wrapper
    ```
 
-3. **Cek log container:**
-   ```bash
-   docker logs -f cli-api-container
-   ```
-
 ---
 
 ## 🧪 Pengujian API Menggunakan cURL
@@ -111,15 +108,16 @@ curl -i http://localhost:8000/health
 
 ---
 
-### 2. Eksekusi Berhasil (`POST /api/chat`)
-Kirim request dengan header autentikasi (`X-API-Key` atau `Authorization: Bearer`):
+### 2. Eksekusi dengan Model Dinamis dari Client (Chiko)
+Kirim request dengan menentukan model secara bebas:
 
 ```bash
 curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -H "X-API-Key: rahasia123" \
   -d '{
-    "prompt": "Halo dunia dari cURL",
+    "prompt": "Halo Chiko!",
+    "model": "gemini-1.5-flash",
     "timeout": 30
   }'
 ```
@@ -128,14 +126,15 @@ curl -X POST http://localhost:8000/api/chat \
 ```json
 {
   "success": true,
-  "output": "[Mock CLI Berhasil]: Input yang diterima -> 'Halo dunia dari cURL'"
+  "output": "[Mock CLI Berhasil | Model: gemini-1.5-flash]: Input diterima -> 'Halo Chiko!'",
+  "model": "gemini-1.5-flash"
 }
 ```
 
 ---
 
 ### 3. Simulasi Error CLI (HTTP 500)
-Jika perintah CLI menghasilkan error (misal dengan mengirim prompt `trigger-error` ke `mock_cli.py`):
+Jika perintah CLI menghasilkan error (misal mengirim prompt `trigger-error`):
 
 ```bash
 curl -X POST http://localhost:8000/api/chat \
@@ -157,8 +156,6 @@ curl -X POST http://localhost:8000/api/chat \
 ---
 
 ### 4. Simulasi Timeout Eksekusi (HTTP 504)
-Kirim prompt `trigger-timeout` dengan parameter timeout pendek (misal 2 detik):
-
 ```bash
 curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
@@ -178,80 +175,10 @@ curl -X POST http://localhost:8000/api/chat \
 
 ---
 
-### 5. Validasi Autentikasi Gagal (HTTP 401)
-Jika token salah atau tidak dikirim:
-
-```bash
-curl -i -X POST http://localhost:8000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "halo"
-  }'
-```
-
-**Respon (HTTP 401 Unauthorized):**
-```json
-{
-  "detail": "Autentikasi gagal: Token API tidak valid atau tidak disertakan."
-}
-```
-
----
-
-## 🔧 Menyesuaikan Dockerfile untuk Tool CLI Kustom Anda
-
-Jika tool CLI Anda membutuhkan biner khusus atau package manager pihak ketiga (misalnya `ffmpeg`, biner Go, npm package, atau dependensi C):
-
-Cukup tambahkan langkah instalasi pada baris `apt-get` atau unduh biner tersebut di dalam `Dockerfile`:
-
-```dockerfile
-# Contoh menambahkan tool tambahan (misal: jq, ffmpeg):
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    git \
-    bash \
-    jq \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
-# ATAU mengunduh biner executable kustom:
-# RUN curl -L -o /usr/local/bin/my-cli https://example.com/download/my-cli && \
-#     chmod +x /usr/local/bin/my-cli
-```
-
-Lalu atur environment variable `CLI_COMMAND` menjadi path tool tersebut (misal: `/usr/local/bin/my-cli`).
-
----
-
 ## 🌐 Panduan Deployment ke Render.com
 
-### Metode A: Menggunakan Render Blueprint (`render.yaml`) - Disarankan
-
-1. Push seluruh kode repository ini ke GitHub / GitLab Anda.
-2. Buka dashboard [Render.com](https://dashboard.render.com).
-3. Klik tombol **New +** di pojok kanan atas, lalu pilih **Blueprint**.
-4. Hubungkan repository GitHub/GitLab Anda.
-5. Render akan secara otomatis membaca konfigurasi `render.yaml`:
-   - Membuat Web Service dengan runtime Docker.
-   - Mengatur healthcheck path ke `/health`.
-   - Meng-generate nilai aman untuk `CLI_AUTH_TOKEN`.
-6. Klik **Apply**. Render akan memulai build Docker dan service Anda akan langsung online!
-
----
-
-### Metode B: Manual Deploy via Render Dashboard
-
-1. Di Render Dashboard, klik **New +** -> **Web Service**.
-2. Pilih repository Anda.
-3. Konfigurasikan pengaturan:
-   - **Name**: `fastapi-cli-wrapper` (atau nama lain pilihan Anda).
-   - **Language / Runtime**: Pilih `Docker`.
-   - **Region**: Pilih yang terdekat (contoh: *Singapore*).
-   - **Branch**: `main`.
-4. Di bagian **Advanced Settings**:
-   - **Health Check Path**: `/health`
-   - **Environment Variables**:
-     - `CLI_AUTH_TOKEN`: Masukkan string token rahasia Anda.
-     - `CLI_COMMAND`: Sesuaikan perintah (contoh: `python3 mock_cli.py`).
-     - `CLI_INPUT_MODE`: `arg`
-5. Klik **Create Web Service**.
+1. Buka dashboard [Render.com](https://dashboard.render.com).
+2. Klik tombol **New +** -> **Blueprint**.
+3. Pilih repository **`ErwinYasa24/fastapi-cli-wrapper`**.
+4. Klik **Deploy Blueprint**.
+5. Render akan secara otomatis mem-build Docker container dan mendeploy web service Anda.

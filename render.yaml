@@ -18,6 +18,10 @@ services:
       - key: CLI_AUTH_TOKEN
         generateValue: true # Render akan secara otomatis membuat token acak yang aman
       - key: CLI_COMMAND
-        value: "echo" # Sesuaikan dengan binary CLI Anda (misal: "my-cli-tool" atau "python -m my_module")
+        value: "echo" # Sesuaikan dengan binary CLI Anda (misal: "my-cli-tool" atau "python3 mock_cli.py")
       - key: CLI_INPUT_MODE
         value: "arg" # Opsi: 'arg' (prompt sebagai parameter) atau 'stdin' (prompt dialirkan lewat stdin)
+      - key: DEFAULT_MODEL
+        value: "gemini-1.5-flash" # Default fallback jika client (Chiko) tidak mengirim parameter 'model'
+      - key: CLI_MODEL_FLAG
+        value: "--model" # Flag yang disisipkan ke CLI (misal: '--model' atau '-m')

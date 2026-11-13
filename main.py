@@ -15,8 +15,14 @@ AUTH_TOKEN = os.getenv("CLI_AUTH_TOKEN") or os.getenv("API_KEY")
 # Command CLI dasar yang akan dibungkus (contoh: 'echo', 'git', atau path binary tool kustom)
 CLI_COMMAND = os.getenv("CLI_COMMAND", "echo")
 
+# Default model AI yang digunakan jika Chiko tidak mengirimkan parameter 'model'
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-1.5-flash")
+
+# Flag argumen untuk model pada CLI tool (misal: '--model' atau '-m', kosongkan jika tidak ingin flag)
+CLI_MODEL_FLAG = os.getenv("CLI_MODEL_FLAG", "--model")
+
 # Mode input:
-# - 'arg'   : prompt dikirimkan sebagai argumen baris perintah (contoh: `my-cli "halo"`)
+# - 'arg'   : prompt dikirimkan sebagai argumen baris perintah (contoh: `my-cli --model gemini "halo"`)
 # - 'stdin' : prompt dikirimkan melalui stdin stream (cocok untuk tool REPL/interaktif)
 CLI_INPUT_MODE = os.getenv("CLI_INPUT_MODE", "arg").lower()
 
@@ -26,7 +32,7 @@ CLI_INPUT_MODE = os.getenv("CLI_INPUT_MODE", "arg").lower()
 app = FastAPI(
     title="CLI Wrapper REST API",
     description="FastAPI service wrapper untuk mengeksekusi Command Line Interface (CLI) tool secara asynchronous.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 # CORS Middleware (mengizinkan pemanggilan dari browser / frontend jika diperlukan)
@@ -49,6 +55,11 @@ class RunRequest(BaseModel):
         description="Teks instruksi atau input yang akan dikirimkan ke CLI tool.",
         examples=["Halo dari REST API"],
     )
+    model: Optional[str] = Field(
+        default=None,
+        description="Nama model AI (misal: 'gemini-1.5-flash', 'gemini-2.0-flash', dll). Jika tidak diisi, menggunakan default server.",
+        examples=["gemini-1.5-flash"],
+    )
     timeout: int = Field(
         default=60,
         ge=1,
@@ -61,6 +72,7 @@ class RunRequest(BaseModel):
 class RunResponse(BaseModel):
     success: bool = Field(..., description="Status keberhasilan eksekusi CLI.")
     output: str = Field(..., description="Hasil output standar (stdout) dari proses CLI.")
+    model: Optional[str] = Field(default=None, description="Nama model yang digunakan saat eksekusi.")
 
 
 class HealthResponse(BaseModel):
@@ -103,10 +115,11 @@ def verify_authentication(
 # ==============================================================================
 # Helper Eksekutor Subprocess (Asynchronous & Safe)
 # ==============================================================================
-async def execute_cli(prompt: str, timeout: int) -> str:
+async def execute_cli(prompt: str, timeout: int, model: Optional[str] = None) -> tuple[str, str]:
     """
     Mengeksekusi CLI tool secara asynchronous dan aman tanpa `shell=True`
     untuk mencegah risiko shell injection.
+    Mengembalikan (stdout_text, active_model).
     """
     # Parsing perintah dasar CLI
     base_args = shlex.split(CLI_COMMAND)
@@ -116,14 +129,28 @@ async def execute_cli(prompt: str, timeout: int) -> str:
             detail="Konfigurasi CLI_COMMAND kosong atau tidak valid.",
         )
 
+    # Tentukan model aktif (prioritas: request dari Chiko > DEFAULT_MODEL)
+    active_model = model.strip() if model and model.strip() else DEFAULT_MODEL
+
+    cmd_args = list(base_args)
+
+    # Tambahkan parameter flag model ke CLI jika ada flag yang dikonfigurasi
+    if active_model and CLI_MODEL_FLAG:
+        cmd_args.extend([CLI_MODEL_FLAG, active_model])
+
     # Tentukan argumen dan stdin sesuai CLI_INPUT_MODE
     stdin_data: Optional[bytes] = None
     if CLI_INPUT_MODE == "stdin":
-        cmd_args = base_args
         stdin_data = prompt.encode("utf-8")
     else:
         # Mode 'arg': prompt ditambahkan sebagai argumen baris perintah
-        cmd_args = base_args + [prompt]
+        cmd_args.append(prompt)
+
+    # Siapkan subprocess environment (mengekspos MODEL dan CLI_MODEL jika CLI membutuhkannya)
+    sub_env = os.environ.copy()
+    if active_model:
+        sub_env["MODEL"] = active_model
+        sub_env["CLI_MODEL"] = active_model
 
     # Jalankan subprocess secara asynchronous
     try:
@@ -132,6 +159,7 @@ async def execute_cli(prompt: str, timeout: int) -> str:
             stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=sub_env,
         )
     except FileNotFoundError:
         raise HTTPException(
@@ -175,7 +203,7 @@ async def execute_cli(prompt: str, timeout: int) -> str:
             detail=f"Perintah CLI gagal dieksekusi: {error_msg}",
         )
 
-    return stdout_text
+    return stdout_text, active_model
 
 
 # ==============================================================================
@@ -198,7 +226,7 @@ async def health_check():
     "/api/chat",
     response_model=RunResponse,
     tags=["CLI Execution"],
-    summary="Kirim prompt instruksi ke CLI tool",
+    summary="Kirim prompt instruksi dan model ke CLI tool",
 )
 @app.post(
     "/api/run",
@@ -213,17 +241,21 @@ async def run_cli_handler(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """
-    Menerima JSON prompt dan timeout, menjalankan perintah CLI,
+    Menerima JSON prompt, opsi model, dan timeout, menjalankan perintah CLI,
     dan mengembalikan hasilnya dalam format JSON.
     """
     # 1. Validasi Autentikasi
     verify_authentication(x_api_key=x_api_key, authorization=authorization)
 
     # 2. Eksekusi CLI Asynchronous
-    output_text = await execute_cli(prompt=payload.prompt, timeout=payload.timeout)
+    output_text, active_model = await execute_cli(
+        prompt=payload.prompt,
+        timeout=payload.timeout,
+        model=payload.model,
+    )
 
     # 3. Return JSON Response
-    return RunResponse(success=True, output=output_text)
+    return RunResponse(success=True, output=output_text, model=active_model)
 
 
 # ==============================================================================

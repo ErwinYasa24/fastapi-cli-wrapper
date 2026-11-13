@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
 """
 Skrip CLI Contoh (Mock CLI) untuk pengujian lokal.
-Anda dapat mengganti ini dengan tool CLI sebenarnya yang ingin Anda bungkus.
+Mendukung argumen model (--model / -m) untuk simulasi CLI AI.
 """
 import sys
 import time
 
 
 def main():
-    if len(sys.argv) < 2:
-        # Jika dipanggil tanpa argumen, baca dari stdin
-        input_text = sys.stdin.read().strip()
+    args = sys.argv[1:]
+    model_name = "default"
+    non_flag_args = []
+
+    # Parsing flag sederhana (--model <nama> atau -m <nama>)
+    i = 0
+    while i < len(args):
+        if args[i] in ("--model", "-m") and i + 1 < len(args):
+            model_name = args[i + 1]
+            i += 2
+        else:
+            non_flag_args.append(args[i])
+            i += 1
+
+    if non_flag_args:
+        input_text = " ".join(non_flag_args).strip()
     else:
-        input_text = " ".join(sys.argv[1:]).strip()
+        input_text = sys.stdin.read().strip()
 
     if not input_text:
-        print("Error: Input kosong tidak diizinkan.", file=sys.stderr)
+        print("Error: Input prompt kosong.", file=sys.stderr)
         sys.exit(1)
 
     # Contoh simulasi error jika prompt berisi keyword 'trigger-error'
@@ -27,8 +40,8 @@ def main():
     if "trigger-timeout" in input_text.lower():
         time.sleep(10)
 
-    # Output sukses standar
-    print(f"[Mock CLI Berhasil]: Input yang diterima -> '{input_text}'")
+    # Output sukses standar dengan informasi model yang digunakan
+    print(f"[Mock CLI Berhasil | Model: {model_name}]: Input diterima -> '{input_text}'")
 
 
 if __name__ == "__main__":
